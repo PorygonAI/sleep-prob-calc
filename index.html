@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>卡比兽概率计算</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: "Helvetica Neue", sans-serif;
+        }
+        body {
+            padding: 15px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .input-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+            color: #333;
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background-color: #2E86AB;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-bottom: 20px;
+        }
+        button:hover {
+            background-color: #1f6b8c;
+        }
+        .result {
+            font-size: 18px;
+            margin-bottom: 20px;
+            color: #333;
+            font-weight: 600;
+            text-align: center;
+        }
+        canvas {
+            width: 100% !important;
+            max-height: 400px;
+            height: 320px !important;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="input-group">
+            <label for="power">卡比兽能量：</label>
+            <input type="number" id="power" min="0" placeholder="请输入数字" required>
+        </div>
+        <div class="input-group">
+            <label for="xRange">指定分数范围（可选，格式如 1,100）：</label>
+            <input type="text" id="xRange" placeholder="留空则默认1-100">
+        </div>
+        <button onclick="calculateProb()">计算并绘图</button>
+        <div class="result" id="result"></div>
+        <canvas id="probChart"></canvas>
+    </div>
+
+    <!-- 引入本地Chart.js（离线使用） -->
+    <script src="chart.umd.js"></script>
+    <!-- 【可选】如果需要annotation插件，需引入：
+    <script src="chartjs-plugin-annotation.umd.js"></script>
+    -->
+
+    <script>
+        // 全局常量：数组shape（对应shape.json）
+        const SHAPE = [35, 9, 15001]; // [level, slot, spo]
+        const SLOT_LENGTH = SHAPE[1]; // 9
+        const SPO_LENGTH = SHAPE[2];  // 15001
+
+        // 1. 实现get_sleep_pose_count函数
+        function getSleepPoseCount(power) {
+            if (0 <= power && power <= 3153519) return 3;
+            else if (3153520 <= power && power <= 7730433) return 4;
+            else if (7730435 <= power && power <= 16659805) return 5;
+            else if (16659808 <= power && power <= 30491709) return 6;
+            else if (30491710 <= power && power <= 68664242) return 7;
+            else if (power >= 68664246) return 8;
+            else throw new Error(`无效睡意之力数值：${power}，不在任何区间内`);
+        }
+
+        // 2. 实现get_rank_id函数
+        function getRankId(power) {
+            const rankThresholds = [
+                [0, 0], [12938, 1], [29756, 2], [48515, 3], [71156, 4],
+                [97031, 5], [130668, 6], [171420, 7], [219936, 8], [272333, 9],
+                [328610, 10], [388122, 11], [452809, 12], [522025, 13], [596086, 14],
+                [675330, 15], [760123, 16], [850851, 17], [958702, 18], [1075709, 19],
+                [1202596, 20], [1340143, 21], [1489190, 22], [1650645, 23], [1825483, 24],
+                [2014758, 25], [2219603, 26], [2441243, 27], [2680993, 28], [2925574, 29],
+                [3188730, 30], [3454577, 31], [3739033, 32], [4166848, 33], [5193272, 34]
+            ];
+            // 从后往前找第一个 <= power 的阈值
+            for (let i = rankThresholds.length - 1; i >= 0; i--) {
+                const [threshold, rid] = rankThresholds[i];
+                if (power >= threshold) return rid;
+            }
+            return 0; // 兜底（power=0时）
+        }
+
+        // 3. 读取二进制文件并解析为Float64Array
+        async function readBinFile(level) {
+            const path = `prob_data/lv_${level}.bin`;
+            try {
+                const response = await fetch(path);
+                if (!response.ok) throw new Error(`无法读取文件：${path}`);
+                const arrayBuffer = await response.arrayBuffer();
+                // Float64Array：8字节/元素，和numpy的float64一致
+                return new Float64Array(arrayBuffer);
+            } catch (error) {
+                alert(`读取二进制文件失败：${error.message}`);
+                throw error;
+            }
+        }
+
+        // 4. 核心计算逻辑
+        async function calculateProb() {
+            // 清空之前的结果和图表
+            document.getElementById("result").textContent = "";
+            const chartCanvas = document.getElementById("probChart");
+            if (window.probChartInstance) {
+                window.probChartInstance.destroy();
+            }
+
+            // 获取输入值
+            const powerInput = document.getElementById("power");
+            const power = parseInt(powerInput.value.trim());
+            const xRangeInput = document.getElementById("xRange").value.trim();
+
+            // 验证输入
+            if (isNaN(power) || power < 0) {
+                alert("卡比兽能量必须是非负整数！");
+                powerInput.focus();
+                return;
+            }
+
+            // 处理分数范围
+            let xRange;
+            if (xRangeInput === "") {
+                xRange = Array.from({length: 100}, (_, i) => i + 1); // 1-100
+            } else {
+                const nums = xRangeInput.split(',').map(num => parseInt(num.trim()));
+                if (nums.length !== 2 || isNaN(nums[0]) || isNaN(nums[1]) || nums[0] > nums[1]) {
+                    alert("分数范围格式错误！请输入如 1,100 的格式");
+                    document.getElementById("xRange").focus();
+                    return;
+                }
+                const [start, end] = nums;
+                xRange = Array.from({length: end - start + 1}, (_, i) => start + i);
+            }
+
+            // 获取当前level并读取对应二进制文件
+            const level = getRankId(power);
+            const binData = await readBinFile(level);
+
+            // 计算每个分数点的概率
+            const probList = [];
+            try {
+                for (const point of xRange) {
+                    const currentPower = power * point;
+                    const slot = getSleepPoseCount(currentPower);
+                    const spo = Math.floor(currentPower / 38000);
+
+                    // 验证slot和spo的范围
+                    if (slot < 0 || slot >= SLOT_LENGTH) {
+                        throw new Error(`slot值${slot}超出范围（0-${SLOT_LENGTH-1}）`);
+                    }
+                    if (spo < 0 || spo >= SPO_LENGTH) {
+                        throw new Error(`spo值${spo}超出范围（0-${SPO_LENGTH-1}）`);
+                    }
+
+                    // 计算数组索引：slot * SPO_LENGTH + spo
+                    const index = slot * SPO_LENGTH + spo;
+                    if (index >= binData.length) {
+                        throw new Error(`索引${index}超出二进制文件长度${binData.length}`);
+                    }
+                    probList.push(binData[index]);
+                }
+            } catch (error) {
+                alert(`概率计算失败：${error.message}`);
+                return;
+            }
+
+            // 找最大概率和对应分数
+            const maxProb = Math.max(...probList);
+            const maxIndex = probList.indexOf(maxProb);
+            const bestPoint = xRange[maxIndex];
+            // 显示结果
+            document.getElementById("result").textContent = 
+                `概率最高的分数是${bestPoint}，概率为${maxProb.toPrecision(6)}`;
+
+            // 5. 绘制图表（适配手机）
+            const ctx = chartCanvas.getContext("2d");
+            window.probChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: xRange,
+                    datasets: [{
+                        label: '概率曲线',
+                        data: probList,
+                        borderColor: '#2E86AB',
+                        borderWidth: 2,
+                        fill: false,
+                        tension: 0.1,
+                        // 【修改1】恢复数据点 + 扩大点击检测范围
+                        pointRadius: 3,        // 显示数据点（核心：恢复交互载体）
+                        pointHitRadius: 6,     // 扩大点击检测范围（提升移动端体验）
+                        pointBackgroundColor: '#2E86AB', // 数据点填充色
+                        pointBorderWidth: 0,
+                        pointBorderColor: '#fff'          // 数据点边框色
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    // 【修改2】增强交互配置：启用交互+优化Tooltip
+                    interaction: {
+                        mode: 'index',    // 悬停时显示对应X轴所有数据
+                        intersect: false, // 不强制精准点击数据点，X轴对齐即可触发
+                        axis: 'x'         // 仅X轴触发交互
+                    },
+                    plugins: {
+                        tooltip: {
+                            enabled: true,       // 启用提示框
+                            backgroundColor: 'rgba(0,0,0,0.7)', // 提示框背景
+                            titleFont: { size: 14 },
+                            bodyFont: { size: 12 },
+                            padding: 10,
+                            // 自定义提示框内容
+                            callbacks: {
+                                label: function(context) {
+                                    return `分数 ${context.label}：概率 ${context.raw.toPrecision(6)}`;
+                                }
+                            }
+                        },
+                        legend: {
+                            position: 'top',
+                            labels: {
+                                font: { size: 14 }
+                            }
+                        }
+                        // 【修改3】移除未引入的annotation插件配置（避免报错）
+                        // 如需保留竖线：① 下载chartjs-plugin-annotation.umd.js ② 引入该文件 ③ 恢复以下配置
+                        // annotation: {
+                        //     annotations: xRange.map((xi, i) => ({
+                        //         type: 'line',
+                        //         xMin: xi,
+                        //         xMax: xi,
+                        //         yMin: 0,
+                        //         yMax: probList[i],
+                        //         borderColor: '#2E86AB',
+                        //         borderWidth: 0.8,
+                        //         borderDash: [5, 5],
+                        //         borderAlpha: 0.4
+                        //     }))
+                        // }
+                    },
+                    scales: {
+                        x: {
+                            title: { display: true, text: '分数' },
+                            ticks: {
+                                // 核心修复1：关闭自动跳过刻度
+                                autoSkip: false,
+                                // 限制最多显示20个刻度，防止文字挤爆
+                                maxTicksLimit: 20,
+                                // 标签旋转，手机不会重叠
+                                maxRotation: 45,
+                                minRotation: 30,
+                                padding: 8, // 标签离轴留出空隙
+                                callback: function(value, index, ticks) {
+                                    const label = this.getLabelForValue(value);
+                                    const num = parseInt(label);
+                                    // 官方规范：返回null隐藏刻度，不要返回''
+                                    return num % 5 === 0 ? label : null;
+                                }
+                            },
+                            grid: {
+                                display: true,
+                                alpha: 0.3
+                            }
+                        },
+                        y: {
+                            title: { display: true, text: '概率' },
+                            min: 0, // Y轴从0开始
+                            grid: {
+                                display: true,
+                                alpha: 0.3
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>
