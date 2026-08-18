@@ -127,7 +127,7 @@
 
         // 3. 读取二进制文件并解析为Float64Array
         async function readBinFile(level) {
-            const path = `prob_data/lv_${level}.bin`;
+            const path = `ralts_probability_bins/level_${level}.bin`;
             try {
                 const response = await fetch(path);
                 if (!response.ok) throw new Error(`无法读取文件：${path}`);
